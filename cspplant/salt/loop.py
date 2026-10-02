@@ -22,9 +22,13 @@ from .persist import SaltPersistence
 from .pump import SaltPump
 from .snapshot import SaltSnapshot
 from .tank import SaltTank
+from ..store.journal import JsonlJournal
 
 COLD_TANK_CAPACITY_KG = 900_000.0
 HOT_TANK_CAPACITY_KG = 900_000.0
+
+# 切换流水按段落滚动落盘。
+HANDOFF_SEGMENT_LIMIT = 128
 
 
 class SaltLoop:
@@ -43,18 +47,37 @@ class SaltLoop:
         self._thermal = thermal
         self._header = header
         self._persistence = persistence
-        self._cold_tank = SaltTank("cold-tank", COLD_TANK_CAPACITY_KG, COLD_TANK_CAPACITY_KG * 0.82)
-        self._hot_tank = SaltTank("hot-tank", HOT_TANK_CAPACITY_KG, HOT_TANK_CAPACITY_KG * 0.12)
+        self._cold_tank = SaltTank(
+            "cold-tank",
+            COLD_TANK_CAPACITY_KG,
+            COLD_TANK_CAPACITY_KG * 0.82,
+            min_pct=limits.cold_level_min_pct,
+        )
+        self._hot_tank = SaltTank(
+            "hot-tank",
+            HOT_TANK_CAPACITY_KG,
+            HOT_TANK_CAPACITY_KG * 0.12,
+            max_pct=limits.hot_level_max_pct,
+        )
         self._cold_pump = SaltPump("cold-pump", limits)
         self._hot_pump = SaltPump("hot-pump", limits)
         self._hydraulic = HydraulicLoop(limits)
-        self._handoff = TankHandoff(limits)
+        self._handoff_journal = JsonlJournal(
+            persistence.store.root, "salt-handoff", segment_limit=HANDOFF_SEGMENT_LIMIT
+        )
+        self._handoff = TankHandoff(limits, isolate=self._isolate_header)
         self._calibrator = FlowCalibrator(limits, threshold)
         self._lock = threading.RLock()
+        self._handoff_in_progress = False
         self._restore()
 
+    def _isolate_header(self, _reason: str) -> None:
+        """切换 fail-safe 整机隔离时关死母管（进口阀由编排侧归零）。"""
+
+        self._header.close()
+
     def _restore(self) -> None:
-        """重启后恢复罐位与流量基线。"""
+        """重启后恢复罐位、流量基线与切换流水。"""
 
         levels = self._persistence.read_levels()
         if levels is not None:
@@ -63,6 +86,8 @@ class SaltLoop:
         baseline = self._persistence.read_baseline()
         if baseline is not None and baseline["baseline_kg_s"] > 0:
             self._threshold.calibrate(baseline["baseline_kg_s"])
+        records = self._handoff_journal.read_all()
+        self._handoff.seed_records(records)
 
     @property
     def limits(self) -> SaltLimits:
@@ -115,10 +140,10 @@ class SaltLoop:
             return self._cold_pump.stop()
 
     def start_hot(self) -> float:
-        """启热泵；冷泵仍在运转即拒绝。"""
+        """启热泵；冷泵仍在运转、且没有处在切换窗口时即拒绝。"""
 
         with self._lock:
-            if self._cold_pump.running():
+            if self._cold_pump.running() and not self._handoff_in_progress:
                 raise InterlockError("冷盐泵仍在运行，禁止启热盐泵", component="salt")
             return self._hot_pump.start()
 
@@ -162,19 +187,37 @@ class SaltLoop:
                 "overpressure": self._header.overpressure(),
             }
 
-    def changeover(self, dt: float = 1.0) -> HandoffReport:
-        """执行冷热罐切换。"""
+    def changeover(self, dt: float = 1.0, *, valve=None, op_id: str = "") -> HandoffReport:
+        """执行冷热罐无断档切换；阀位用于回读核对与 fail-safe 归零。"""
 
         with self._lock:
-            return self._handoff.changeover(
-                self._cold_pump,
-                self._hot_pump,
-                self._cold_tank,
-                self._hot_tank,
-                self._header,
-                self._hydraulic,
-                dt,
-            )
+            self._handoff_in_progress = True
+            try:
+                report = self._handoff.changeover(
+                    self._cold_pump,
+                    self._hot_pump,
+                    self._cold_tank,
+                    self._hot_tank,
+                    self._header,
+                    self._hydraulic,
+                    dt,
+                    valve=valve,
+                    op_id=op_id,
+                )
+            finally:
+                self._handoff_in_progress = False
+            record = report.as_dict()
+            record["op_id"] = op_id
+            self._handoff_journal.append(record)
+            # 成功切换与 fail-safe 后都把罐位落盘，重启看到的存量不撒谎。
+            self._persistence.save_levels(self._cold_tank.level_pct(), self._hot_tank.level_pct(), 0.0)
+            return report
+
+    def handoff_records(self, limit: int = 20) -> list[dict]:
+        """返回最近的切换记录（含失败与过冲），供控制台与审计核对。"""
+
+        with self._lock:
+            return self._handoff.records(limit=limit)
 
     def calibrate_flow(self, measured_kg_s: float, now: float, operator: str = "console") -> CalibrationRecord:
         """按实测流量重新标定基线并落盘。"""
@@ -222,6 +265,8 @@ class SaltLoop:
             "threshold_evaluations": self._threshold.evaluations(),
             "epoch": self._threshold.epoch,
             "changeovers": self._handoff.changeovers(),
+            "handoff_last": (self._handoff.records(limit=1) or [None])[-1],
+            "handoff_recent": self._handoff.records(limit=10),
             "calibrations": [record.as_dict() for record in self.calibrator.records()],
         }
 

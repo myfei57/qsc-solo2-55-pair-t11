@@ -102,7 +102,7 @@ def _receiver_page(platform: Platform) -> str:
 
 
 def _salt_page(platform: Platform) -> str:
-    """熔盐页：罐位、泵与联锁门限。"""
+    """熔盐页：罐位、泵、联锁门限与冷热罐切换。"""
 
     salt = platform.status()["salt"]
     rows = [
@@ -113,13 +113,61 @@ def _salt_page(platform: Platform) -> str:
         ("母管净流量 (kg/s)", salt["net_flow_kg_s"]),
         ("母管压力 (MPa)", salt["header"]["pressure_mpa"]),
         ("在运泵数", salt["cold_pump"]["running"] + salt["hot_pump"]["running"]),
-        ("两泵对顶步数", salt["opposed_steps"]),
+        ("两泵非协同对顶步数", salt["opposed_steps"]),
         ("流量基线 (kg/s)", salt["baseline_kg_s"]),
         ("联锁门限 (kg/s)", salt["threshold_kg_s"]),
         ("标定代际", salt["epoch"]),
         ("成功切换次数", salt["changeovers"]),
     ]
-    return _shell("熔盐控制台", _table("熔盐回路", rows))
+    body = _table("熔盐回路", rows)
+
+    last = salt.get("handoff_last")
+    if last:
+        verdict = "成功" if last.get("ok") else ("退回安全位" if last.get("aborted") else "联锁拒绝")
+        handoff_rows = [
+            ("结果", verdict),
+            ("档位", "快速（极端罐况）" if last.get("mode") == "fast" else "平滑"),
+            ("过渡基准", "流量斜率（时长仅作看门狗）"),
+            ("窗口用时 (s)", last.get("duration_s")),
+            ("压力峰值 / 过冲 (MPa)", f"{last.get('peak_pressure_mpa')} / {last.get('pressure_overshoot_mpa')}"),
+            ("流量最低 / 跌落 (kg/s)", f"{last.get('min_flow_kg_s')} / {last.get('flow_dip_kg_s')}"),
+            ("流量最高 / 过冲 (kg/s)", f"{last.get('max_flow_kg_s')} / {last.get('flow_overshoot_kg_s')}"),
+            ("退回安全位", last.get("safe_position")),
+            ("回读失败部件", ", ".join(last.get("readback_failures", [])) or "-"),
+            ("违约项", ", ".join(last.get("violations", [])) or "-"),
+            ("转移盐量 (kg)", last.get("transfer_kg")),
+        ]
+        body += _table("最近一次冷热罐切换", handoff_rows)
+        body += _table(
+            "切换过程流量 / 压力轨迹（按流量斜率）",
+            [
+                (
+                    f"t={point['t_s']}s",
+                    (
+                        f"冷 {point['cold_kg_s']} → 热 {point['hot_kg_s']} kg/s，"
+                        f"净 {point['net_kg_s']} kg/s，压力 {point['pressure_mpa']} MPa"
+                    ),
+                )
+                for point in last.get("trace", [])
+            ]
+            or [("暂无", "尚未执行过切换")],
+        )
+
+    recent_rows = [
+        (
+            record.get("op_id", "-"),
+            (
+                f"{'成功' if record.get('ok') else '失败'} / "
+                f"{'快速' if record.get('mode') == 'fast' else '平滑'} / "
+                f"压力过冲 {record.get('pressure_overshoot_mpa')} MPa / "
+                f"流量跌落 {record.get('flow_dip_kg_s')} kg/s / "
+                f"{record.get('duration_s')} s / {record.get('safe_position')}"
+            ),
+        )
+        for record in salt.get("handoff_recent", [])
+    ]
+    body += _table("最近切换记录（过冲逐回可比）", recent_rows or [("暂无", "-")])
+    return _shell("熔盐控制台", body)
 
 
 def _alarm_page(platform: Platform) -> str:

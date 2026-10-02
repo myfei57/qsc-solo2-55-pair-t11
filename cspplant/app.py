@@ -400,17 +400,31 @@ class Platform:
             return {**report, **summary}
 
     def changeover(self) -> dict:
-        """冷热罐切换：先停冷泵、再启热泵。"""
+        """冷热罐切换：按流量斜率协同让负荷，净流量与母管压力不断档。"""
 
         with self._lock:
             op_id = self.ids.next()
-            handoff = self.salt.changeover()
+            handoff = self.salt.changeover(valve=self.receiver.valve, op_id=op_id)
             report = {
                 "ok": handoff.ok,
+                "mode": handoff.mode,
+                "basis": handoff.basis,
+                "duration_s": handoff.duration_s,
                 "steps": handoff.steps,
                 "violations": handoff.violations,
+                "aborted": handoff.aborted,
+                "safe_position": handoff.safe_position,
+                "baseline_kg_s": handoff.baseline_kg_s,
                 "peak_pressure_mpa": handoff.peak_pressure_mpa,
+                "pressure_overshoot_mpa": handoff.pressure_overshoot_mpa,
+                "min_flow_kg_s": handoff.min_flow_kg_s,
+                "max_flow_kg_s": handoff.max_flow_kg_s,
+                "flow_dip_kg_s": handoff.flow_dip_kg_s,
+                "flow_overshoot_kg_s": handoff.flow_overshoot_kg_s,
                 "max_pumps_running": handoff.max_pumps_running,
+                "transfer_kg": handoff.transfer_kg,
+                "readback_failures": handoff.readback_failures,
+                "trace": handoff.trace,
             }
             summary = self._record_operation(op_id, "changeover", report)
             self._operations += 1
@@ -553,6 +567,61 @@ class Platform:
 
         with self._lock:
             return self.salt.disturb(heat_fraction)
+
+    def inject_fault(self, device: str, fault: str = "readback", reading: float = 0.0) -> dict:
+        """演练专用：向泵或阀注入回读故障，验证切换 fail-safe。
+
+        ``device`` 取 ``cold_pump`` / ``hot_pump`` / ``inlet_valve``；``fault``
+        目前只支持 ``readback``，``reading`` 是回读被钉住的读值。生产控制路径
+        不调用此方法，仅供演练与测试触发部分失败。
+        """
+
+        from .salt import faults
+
+        with self._lock:
+            if device == "cold_pump":
+                if fault != "readback":
+                    raise PlantError(f"不支持的故障类型: {fault}", component="salt")
+                faults.inject_pump_readback_fault(self.salt.cold_pump, reading)
+            elif device == "hot_pump":
+                if fault != "readback":
+                    raise PlantError(f"不支持的故障类型: {fault}", component="salt")
+                faults.inject_pump_readback_fault(self.salt.hot_pump, reading)
+            elif device == "inlet_valve":
+                if fault != "readback":
+                    raise PlantError(f"不支持的故障类型: {fault}", component="receiver")
+                faults.inject_valve_readback_fault(self.receiver.valve, reading)
+            else:
+                raise PlantError(f"未知设备: {device}", component="salt")
+            self.bus.publish(
+                Event.of(
+                    "salt",
+                    "salt",
+                    "fault_injected",
+                    severity="warning",
+                    message=f"演练注入 {device} 回读故障",
+                    device=device,
+                    fault=fault,
+                    reading=float(reading),
+                )
+            )
+            return {"device": device, "fault": fault, "reading": float(reading)}
+
+    def clear_fault(self, device: str, fault: str = "readback") -> dict:
+        """演练专用：清除 :meth:`inject_fault` 注入的回读故障。"""
+
+        from .salt import faults
+
+        with self._lock:
+            if device == "cold_pump":
+                faults.clear_pump_readback_fault(self.salt.cold_pump)
+            elif device == "hot_pump":
+                faults.clear_pump_readback_fault(self.salt.hot_pump)
+            elif device == "inlet_valve":
+                faults.clear_valve_readback_fault(self.receiver.valve)
+            else:
+                raise PlantError(f"未知设备: {device}", component="salt")
+            return {"device": device, "fault": fault, "cleared": True}
 
     # ---- 控制循环 -----------------------------------------------------
 

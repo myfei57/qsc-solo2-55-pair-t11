@@ -41,7 +41,15 @@
       "flow_baseline_kg_s": 58.0,
       "flow_tolerance_kg_s": 9.0,
       "header_pressure_target_mpa": 2.5,
-      "header_pressure_max_mpa": 3.4
+      "header_pressure_max_mpa": 3.4,
+      "handoff_flow_slope_kg_s2": 2.5,
+      "handoff_fast_slope_kg_s2": 5.0,
+      "handoff_max_window_s": 300.0,
+      "handoff_fast_window_s": 180.0,
+      "handoff_extreme_margin_pct": 5.0,
+      "handoff_flow_floor_kg_s": 42.0,
+      "handoff_pressure_overshoot_mpa": 0.4,
+      "handoff_readback_tolerance_kg_s": 3.0
     },
     "steam": {
       "pressure_target_mpa": 12.0,

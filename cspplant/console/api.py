@@ -50,6 +50,7 @@ class Api:
         add("GET", "/api/trend", self._trend)
         add("GET", "/api/events", self._events)
         add("GET", "/api/audit", self._audit)
+        add("GET", "/api/handoffs", self._handoffs)
         add("GET", "/api/alarms", self._alarms)
         add("GET", "/api/timeline", self._timeline)
         add("GET", "/api/journal", self._journal)
@@ -71,6 +72,7 @@ class Api:
         add("POST", "/api/reset", self._reset)
         add("POST", "/api/concurrency", self._concurrency)
         add("POST", "/api/disturb", self._disturb)
+        add("POST", "/api/inject-fault", self._inject_fault)
         add("POST", "/api/plant/reset-state", lambda params, body: {"removed": self._platform.reset_state()})
 
     def routes(self) -> list[dict]:
@@ -160,6 +162,16 @@ class Api:
     def _audit(self, params: dict, body: dict) -> dict:
         limit = int(params.get("limit", 100))
         return {"entries": self._platform.audit.entries(limit=limit)}
+
+    def _handoffs(self, params: dict, body: dict) -> dict:
+        limit = int(params.get("limit", 20))
+        records = self._platform.salt.handoff_records(limit=limit)
+        return {
+            "basis": "flow_slope",
+            "count": len(records),
+            "records": records,
+            "last": records[-1] if records else None,
+        }
 
     def _alarms(self, params: dict, body: dict) -> dict:
         limit = int(params.get("limit", 20))
@@ -276,3 +288,11 @@ class Api:
         if kind == "salt":
             return self._platform.disturb_salt(_as_float(body, "value", 0.2))
         return self._platform.disturb_steam(_as_float(body, "value", 0.0))
+
+    def _inject_fault(self, params: dict, body: dict) -> dict:
+        device = str(body.get("device", "cold_pump"))
+        fault = str(body.get("fault", "readback"))
+        reading = _as_float(body, "reading", 0.0)
+        if str(body.get("clear", False)).lower() in ("1", "true", "yes"):
+            return self._platform.clear_fault(device, fault)
+        return self._platform.inject_fault(device, fault, reading)

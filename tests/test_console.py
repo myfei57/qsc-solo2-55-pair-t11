@@ -79,6 +79,48 @@ def test_api_readiness_and_forecast(platform):
     assert len(forecast["points"]) >= 3
 
 
+def test_api_handoffs_exposes_bumpless_records(platform):
+    api = Api(platform)
+    platform.start()
+    platform.track(820.0, 720.0)
+    platform.circulate()
+    platform.changeover()
+    status, payload = api.handle("GET", "/api/handoffs", {"limit": "10"}, {})
+    assert status == 200
+    assert payload["basis"] == "flow_slope"
+    assert payload["count"] == 1
+    last = payload["last"]
+    assert last["ok"] is True
+    assert "pressure_overshoot_mpa" in last and "flow_dip_kg_s" in last
+    assert last["trace"]
+
+
+def test_salt_page_shows_handoff_panel(platform):
+    platform.start()
+    platform.track(820.0, 720.0)
+    platform.circulate()
+    platform.changeover()
+    html = render_page("/salt", platform)
+    assert "最近一次冷热罐切换" in html
+    assert "流量斜率" in html
+    assert "切换过程流量 / 压力轨迹" in html
+
+
+def test_api_inject_fault_makes_changeover_retreat(platform):
+    api = Api(platform)
+    platform.start()
+    platform.track(820.0, 720.0)
+    platform.circulate()
+    status, injected = api.handle(
+        "POST", "/api/inject-fault", {}, {"device": "cold_pump", "fault": "readback", "reading": 0}
+    )
+    assert status == 200 and injected["device"] == "cold_pump"
+    status, result = api.handle("POST", "/api/changeover", {}, {})
+    assert status == 200
+    assert result["ok"] is False
+    assert "cold_pump_readback_fault" in result["violations"]
+
+
 def test_api_alarm_endpoints(platform):
     api = Api(platform)
     platform.start()

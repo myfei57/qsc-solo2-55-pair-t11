@@ -75,8 +75,19 @@ class SaltHeader:
         self._state = CLOSED
         return self._state
 
-    def update(self, flow_kg_s: float, pumps_running: int, dt: float) -> float:
-        """按流量与在运泵数推进母管压力，返回推进后的压力。"""
+    def update(
+        self,
+        flow_kg_s: float,
+        pumps_running: int,
+        dt: float,
+        *,
+        coordinated: bool = False,
+    ) -> float:
+        """按流量与在运泵数推进母管压力，返回推进后的压力。
+
+        ``coordinated=True`` 表示两泵处于切换窗口的受控交接状态：不施加对顶
+        顶压倍数。非协同两泵并运仍按顶压处理。
+        """
 
         if dt <= 0:
             raise ValueError("步长必须为正")
@@ -84,7 +95,7 @@ class SaltHeader:
         self._pumps = int(pumps_running)
         baseline = max(1e-6, self._limits.flow_baseline_kg_s)
         head = self._limits.header_pressure_target_mpa * (self._flow / baseline)
-        if self._pumps >= 2:
+        if self._pumps >= 2 and not coordinated:
             head *= OPPOSED_PUMP_FACTOR
         blend = min(1.0, dt / 5.0)
         self._pressure += (head - self._pressure) * blend

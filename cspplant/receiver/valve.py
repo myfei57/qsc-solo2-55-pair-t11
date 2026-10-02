@@ -18,6 +18,7 @@ class InletValve:
         self._position = max(0.0, min(100.0, float(position_pct)))
         self._target = self._position
         self._moves = 0
+        self._readback_fault: float | None = None
 
     @property
     def limits(self) -> ReceiverLimits:
@@ -44,8 +45,10 @@ class InletValve:
         return self._position
 
     def position_pct(self) -> float:
-        """返回当前开度。"""
+        """返回当前开度回读（故障时上报卡住的读值）。"""
 
+        if self._readback_fault is not None:
+            return self._readback_fault
         return self._position
 
     def target_pct(self) -> float:
@@ -54,14 +57,25 @@ class InletValve:
         return self._target
 
     def at_target(self) -> bool:
-        """是否已经停在目标开度。"""
+        """回读开度是否已经停在目标开度。"""
 
-        return abs(self._position - self._target) < 1e-9
+        return abs(self.position_pct() - self._target) < 1e-9
 
     def is_open(self, threshold_pct: float = 95.0) -> bool:
-        """开度是否达到给定阈值。"""
+        """开度回读是否达到给定阈值。"""
 
-        return self._position >= threshold_pct
+        return self.position_pct() >= threshold_pct
+
+    def set_readback_fault(self, reading_pct: float | None = 0.0) -> float | None:
+        """注入／清除回读故障；返回注入后的固定读值（``None`` 表示已清除）。"""
+
+        self._readback_fault = None if reading_pct is None else max(0.0, min(100.0, float(reading_pct)))
+        return self._readback_fault
+
+    def readback_fault(self) -> bool:
+        """阀门是否处于回读故障状态。"""
+
+        return self._readback_fault is not None
 
     def moves(self) -> int:
         """返回累计被限速的行程步数。"""

@@ -2,7 +2,12 @@
 
 泵按升速斜率逼近目标流量：启泵不是瞬间满流，停泵也不是瞬间断流。流量由
 ``step`` 显式推进，编排必须在泵真正停下来之后才允许启另一台，否则两台泵会
-在母管上对顶。
+在母管上对顶。切换窗口里编排可以用 ``set_flow_target`` 给在运泵下达中间流量
+指令，让一台斜坡让出负荷、另一台斜坡接住，指令之和始终锚定基线。
+
+回读故障通过 ``set_readback_fault`` 注入：注入后该泵上报的流量读值固定为
+注入值（例如卡在 0），编排据此判定"指令已下、回读没跟上"的部分失败并退回
+安全位。
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ class SaltPump:
         self._demand = False
         self._starts = 0
         self._stops = 0
+        self._readback_fault: float | None = None
 
     @property
     def name(self) -> str:
@@ -49,6 +55,14 @@ class SaltPump:
         self._stops += 1
         return 0.0
 
+    def set_flow_target(self, kg_s: float) -> float:
+        """给在运泵下达中间流量指令；停着的泵拒绝，负流量夹到 0。"""
+
+        if not self._demand:
+            raise InterlockError(f"{self._name} 未在运行，禁止下达流量指令", component="salt")
+        self._target = max(0.0, float(kg_s))
+        return self._target
+
     def step(self, dt: float) -> float:
         """按升速斜率推进一个步长，返回推进后的流量。"""
 
@@ -56,6 +70,20 @@ class SaltPump:
             raise ValueError("步长必须为正")
         target = self._target if self._demand else 0.0
         span = self._limits.pump_ramp_kg_s2 * dt
+        gap = target - self._flow
+        if abs(gap) <= span:
+            self._flow = target
+        else:
+            self._flow += span if gap > 0 else -span
+        return self._flow
+
+    def step_toward(self, target_kg_s: float, slope_kg_s2: float, dt: float) -> float:
+        """按指定斜率把当前流量向 ``target_kg_s`` 推进一步（不改变需求位）。"""
+
+        if dt <= 0:
+            raise ValueError("步长必须为正")
+        target = max(0.0, float(target_kg_s))
+        span = max(0.0, float(slope_kg_s2)) * dt
         gap = target - self._flow
         if abs(gap) <= span:
             self._flow = target
@@ -73,7 +101,14 @@ class SaltPump:
         return self._flow
 
     def flow_kg_s(self) -> float:
-        """返回当前流量。"""
+        """返回当前流量（回读故障时上报卡住的读值）。"""
+
+        if self._readback_fault is not None:
+            return self._readback_fault
+        return self._flow
+
+    def commanded_flow_kg_s(self) -> float:
+        """返回泵内部实际流量（仅供编排核对回读偏差，不参与对外汇总）。"""
 
         return self._flow
 
@@ -97,6 +132,17 @@ class SaltPump:
 
         return abs(self._flow - self.target_flow_kg_s()) < 1e-9
 
+    def set_readback_fault(self, reading_kg_s: float | None = 0.0) -> float | None:
+        """注入／清除回读故障；返回注入后的固定读值（``None`` 表示已清除）。"""
+
+        self._readback_fault = None if reading_kg_s is None else max(0.0, float(reading_kg_s))
+        return self._readback_fault
+
+    def readback_fault(self) -> bool:
+        """该泵是否处于回读故障状态。"""
+
+        return self._readback_fault is not None
+
     def starts(self) -> int:
         """返回累计启泵次数。"""
 
@@ -111,8 +157,9 @@ class SaltPump:
         return {
             "name": self._name,
             "running": self._demand,
-            "flow_kg_s": round(self._flow, 3),
+            "flow_kg_s": round(self.flow_kg_s(), 3),
             "target_flow_kg_s": round(self.target_flow_kg_s(), 3),
             "starts": self._starts,
             "stops": self._stops,
+            "readback_fault": self.readback_fault(),
         }

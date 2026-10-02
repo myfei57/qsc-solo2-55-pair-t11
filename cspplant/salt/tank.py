@@ -88,6 +88,16 @@ class SaltTank:
 
         return max(0.0, self._capacity * self._max_pct / 100.0 - self._level)
 
+    def headroom_pct(self) -> float:
+        """返回距上限的液位余量（百分点）。"""
+
+        return max(0.0, self._max_pct - self.level_pct())
+
+    def drawable_pct(self) -> float:
+        """返回距下限的液位余量（百分点）。"""
+
+        return max(0.0, self.level_pct() - self._min_pct)
+
     def at_min(self) -> bool:
         """液位是否已到下限。"""
 

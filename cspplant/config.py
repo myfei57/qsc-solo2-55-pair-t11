@@ -189,6 +189,14 @@ class SaltLimits:
     flow_tolerance_kg_s: float
     header_pressure_target_mpa: float
     header_pressure_max_mpa: float
+    handoff_flow_slope_kg_s2: float
+    handoff_fast_slope_kg_s2: float
+    handoff_max_window_s: float
+    handoff_fast_window_s: float
+    handoff_extreme_margin_pct: float
+    handoff_flow_floor_kg_s: float
+    handoff_pressure_overshoot_mpa: float
+    handoff_readback_tolerance_kg_s: float
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "SaltLimits":
@@ -201,11 +209,33 @@ class SaltLimits:
             flow_tolerance_kg_s=_number(section, "flow_tolerance_kg_s", minimum=0.1),
             header_pressure_target_mpa=_number(section, "header_pressure_target_mpa", minimum=0.1),
             header_pressure_max_mpa=_number(section, "header_pressure_max_mpa", minimum=0.2),
+            handoff_flow_slope_kg_s2=_number(section, "handoff_flow_slope_kg_s2", minimum=0.01),
+            handoff_fast_slope_kg_s2=_number(section, "handoff_fast_slope_kg_s2", minimum=0.01),
+            handoff_max_window_s=_number(section, "handoff_max_window_s", minimum=1.0),
+            handoff_fast_window_s=_number(section, "handoff_fast_window_s", minimum=1.0),
+            handoff_extreme_margin_pct=_number(section, "handoff_extreme_margin_pct", minimum=0.0),
+            handoff_flow_floor_kg_s=_number(section, "handoff_flow_floor_kg_s", minimum=0.0),
+            handoff_pressure_overshoot_mpa=_number(
+                section, "handoff_pressure_overshoot_mpa", minimum=0.0
+            ),
+            handoff_readback_tolerance_kg_s=_number(
+                section, "handoff_readback_tolerance_kg_s", minimum=0.0
+            ),
         )
         if limits.hot_level_max_pct > 100.0:
             raise ConfigError("热盐罐上限不得超过 100%", component="config")
         if limits.header_pressure_max_mpa <= limits.header_pressure_target_mpa:
             raise ConfigError("母管压力上限必须大于目标值", component="config")
+        if limits.handoff_fast_slope_kg_s2 < limits.handoff_flow_slope_kg_s2:
+            raise ConfigError("快速切换斜率不得小于平滑切换斜率", component="config")
+        if limits.handoff_max_window_s < limits.handoff_fast_window_s:
+            raise ConfigError("平滑切换窗口不得小于快速切换窗口", component="config")
+        if limits.handoff_flow_floor_kg_s >= limits.flow_baseline_kg_s:
+            raise ConfigError("切换流量下限必须小于基线流量", component="config")
+        if limits.handoff_pressure_overshoot_mpa >= (
+            limits.header_pressure_max_mpa - limits.header_pressure_target_mpa
+        ):
+            raise ConfigError("允许过压余量必须小于目标到上限的间隔", component="config")
         return limits
 
     def low_flow_threshold(self, baseline_kg_s: float) -> float:
@@ -347,7 +377,24 @@ def default_config() -> PlatformConfig:
         irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
-        salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
+        salt=SaltLimits(
+            18.0,
+            96.0,
+            1.4,
+            15.0,
+            58.0,
+            9.0,
+            2.5,
+            3.4,
+            handoff_flow_slope_kg_s2=2.5,
+            handoff_fast_slope_kg_s2=5.0,
+            handoff_max_window_s=300.0,
+            handoff_fast_window_s=180.0,
+            handoff_extreme_margin_pct=5.0,
+            handoff_flow_floor_kg_s=42.0,
+            handoff_pressure_overshoot_mpa=0.4,
+            handoff_readback_tolerance_kg_s=3.0,
+        ),
         steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
         alarm=AlarmLimits(5.0, 120.0),
@@ -398,6 +445,14 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "flow_tolerance_kg_s": cfg.salt.flow_tolerance_kg_s,
                 "header_pressure_target_mpa": cfg.salt.header_pressure_target_mpa,
                 "header_pressure_max_mpa": cfg.salt.header_pressure_max_mpa,
+                "handoff_flow_slope_kg_s2": cfg.salt.handoff_flow_slope_kg_s2,
+                "handoff_fast_slope_kg_s2": cfg.salt.handoff_fast_slope_kg_s2,
+                "handoff_max_window_s": cfg.salt.handoff_max_window_s,
+                "handoff_fast_window_s": cfg.salt.handoff_fast_window_s,
+                "handoff_extreme_margin_pct": cfg.salt.handoff_extreme_margin_pct,
+                "handoff_flow_floor_kg_s": cfg.salt.handoff_flow_floor_kg_s,
+                "handoff_pressure_overshoot_mpa": cfg.salt.handoff_pressure_overshoot_mpa,
+                "handoff_readback_tolerance_kg_s": cfg.salt.handoff_readback_tolerance_kg_s,
             },
             "steam": {
                 "pressure_target_mpa": cfg.steam.pressure_target_mpa,
