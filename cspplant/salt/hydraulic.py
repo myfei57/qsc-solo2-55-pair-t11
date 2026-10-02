@@ -1,8 +1,10 @@
 """水力模型。
 
-在运泵的流量叠加得到母管总流量；两台泵同时运行时互相顶压，净流量并不等于
-两者之和，而是打一个折扣。模型只做账，不直接读泵的私有字段——泵把自己当前
-流量报出来，由这里汇总。
+在运泵的流量叠加得到母管总流量。正常情况下两台泵同时运行会互相顶压，净流量
+并不等于两者之和，而是打一个折扣；切换期间走"流量斜率协调"时，两台泵的流量
+指令由切换编排按份额交叉下发，它们不是对顶关系，总流量按实际叠加记账，不打
+折扣——这正是切换过渡不再塌流量的来源。``coordinated`` 只能由切换编排给出，
+手动并泵仍然走对顶模型并累计 ``opposed_steps``。
 """
 
 from __future__ import annotations
@@ -27,8 +29,12 @@ class HydraulicLoop:
     def limits(self) -> SaltLimits:
         return self._limits
 
-    def update(self, pumps: list[SaltPump], dt: float) -> float:
-        """推进一个步长并汇总净流量。"""
+    def update(self, pumps: list[SaltPump], dt: float, coordinated: bool = False) -> float:
+        """推进一个步长并汇总净流量。
+
+        ``coordinated=True`` 表示两台泵正处在切换编排的流量斜率交叉阶段，总流量
+        按实际流量叠加；否则沿用两泵对顶折扣。
+        """
 
         if dt <= 0:
             raise ValueError("步长必须为正")
@@ -36,7 +42,7 @@ class HydraulicLoop:
             pump.step(dt)
         running = [pump for pump in pumps if pump.running()]
         total = sum(pump.flow_kg_s() for pump in pumps)
-        if len(running) >= 2:
+        if len(running) >= 2 and not coordinated:
             total *= OPPOSED_FLOW_FACTOR
             self._opposed_steps += 1
         self._flow = max(0.0, total)

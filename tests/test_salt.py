@@ -62,19 +62,34 @@ def test_tank_levels_and_bounds():
         tank.fill(10.0)
 
 
-def test_changeover_stops_cold_before_starting_hot(platform):
+def test_changeover_crosses_over_without_flow_gap(platform):
     platform.start()
     platform.track(800.0, 720.0)
     platform.circulate()
+    platform.salt.close_recirc()
+    for _ in range(20):
+        platform.salt.step_recirc(1.0)
     report = platform.changeover()
     assert report["ok"] is True
     assert report["violations"] == []
-    assert report["max_pumps_running"] == 1
+    # 流量斜率交叉：两泵在交叉阶段短时重叠，但总流量始终不断档。
+    assert report["max_pumps_running"] == 2
+    assert report["flow_min_kg_s"] == pytest.approx(
+        platform.config.salt.flow_baseline_kg_s, abs=report["flow_undershoot_kg_s"] + 1e-6
+    )
+    assert report["flow_undershoot_kg_s"] < platform.config.salt.handoff_flow_band_kg_s
+    assert report["flow_overshoot_kg_s"] < platform.config.salt.handoff_flow_band_kg_s
     assert report["peak_pressure_mpa"] < platform.config.salt.header_pressure_max_mpa
-    actions = [step["action"] for step in report["steps"]]
-    assert actions.index("stop_cold_pump") < actions.index("start_hot_pump")
     assert platform.salt.cold_pump.running() is False
     assert platform.salt.hot_pump.running() is True
+    # 时序写死：回流阀隔离 → 启热泵 → 交叉 → 停冷泵 → 确认。
+    actions = [step["action"] for step in report["steps"]]
+    assert actions.index("close_recirc_valve") < actions.index("start_hot_pump")
+    assert actions.index("start_hot_pump") < actions.index("flow_crossover_begin")
+    assert actions.index("flow_crossover_begin") < actions.index("stop_cold_pump")
+    assert actions.index("stop_cold_pump") < actions.index("confirm_flow_pressure")
+    # 协调重叠不记对顶步数。
+    assert platform.salt.hydraulic.opposed_steps() == 0
 
 
 def test_changeover_requires_running_cold_pump(platform):
@@ -82,6 +97,7 @@ def test_changeover_requires_running_cold_pump(platform):
     report = platform.changeover()
     assert report["ok"] is False
     assert "cold_pump_not_running" in report["violations"]
+    assert report["outcome"] == "rejected"
 
 
 def test_start_hot_pump_rejected_while_cold_running(platform):

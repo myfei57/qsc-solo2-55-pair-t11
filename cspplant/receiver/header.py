@@ -1,8 +1,9 @@
 """熔盐母管接口。
 
-吸热器出口经母管连到盐侧：只有流量确认之后才允许通盐（干烧的物理原因），
-母管压力由通过的流量与在运泵数决定。两台泵同时运行时两路互相顶压，压力会
-明显高于单泵，这正是冷热罐切换必须先停后启的原因。
+只有流量确认之后才允许通盐（干烧的物理原因），母管压力由通过的流量与在运泵数
+决定。正常情况下两台泵同时运行会两路互相顶压，压力明显高于单泵，这是手动并泵
+必须禁止的原因；切换期间两台泵按流量斜率协调交接（``coordinated=True``），
+指令上不存在对顶，压力只按总流量记账，不再叠加顶压倍数。
 """
 
 from __future__ import annotations
@@ -75,8 +76,12 @@ class SaltHeader:
         self._state = CLOSED
         return self._state
 
-    def update(self, flow_kg_s: float, pumps_running: int, dt: float) -> float:
-        """按流量与在运泵数推进母管压力，返回推进后的压力。"""
+    def update(self, flow_kg_s: float, pumps_running: int, dt: float, coordinated: bool = False) -> float:
+        """按流量与在运泵数推进母管压力，返回推进后的压力。
+
+        ``coordinated=True`` 表示两泵正处在切换编排的流量斜率交叉阶段，不叠加
+        顶压倍数。
+        """
 
         if dt <= 0:
             raise ValueError("步长必须为正")
@@ -84,7 +89,7 @@ class SaltHeader:
         self._pumps = int(pumps_running)
         baseline = max(1e-6, self._limits.flow_baseline_kg_s)
         head = self._limits.header_pressure_target_mpa * (self._flow / baseline)
-        if self._pumps >= 2:
+        if self._pumps >= 2 and not coordinated:
             head *= OPPOSED_PUMP_FACTOR
         blend = min(1.0, dt / 5.0)
         self._pressure += (head - self._pressure) * blend

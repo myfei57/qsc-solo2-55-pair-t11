@@ -60,8 +60,15 @@ class Api:
         add("POST", "/api/circulate", self._circulate)
         add("POST", "/api/cycle", self._cycle)
         add("POST", "/api/dispatch", self._dispatch)
-        add("POST", "/api/changeover", lambda params, body: self._platform.changeover())
+        add("POST", "/api/changeover", self._changeover)
+        add("POST", "/api/changeover/begin", self._changeover_begin)
+        add("POST", "/api/changeover/step", self._changeover_step)
+        add("POST", "/api/changeover/abort", self._changeover_abort)
+        add("GET", "/api/handoffs", self._handoffs)
+        add("GET", "/api/handoffs/verify", self._handoffs_verify)
+        add("POST", "/api/salt/fault", self._salt_fault)
         add("POST", "/api/pump", self._pump)
+        add("POST", "/api/recirc", self._recirc)
         add("POST", "/api/calibrate", self._calibrate)
         add("POST", "/api/manual", self._manual)
         add("POST", "/api/manual/release", self._manual_release)
@@ -270,6 +277,67 @@ class Api:
         if action == "hot_stop":
             return {"action": action, "target_flow_kg_s": salt.stop_hot()}
         raise PlantError(f"未知的泵操作: {action}", component="console")
+
+    def _recirc(self, params: dict, body: dict) -> dict:
+        action = str(body.get("action", "open"))
+        salt = self._platform.salt
+        if action == "open":
+            target = salt.open_recirc()
+        elif action == "close":
+            target = salt.close_recirc()
+        elif action == "step":
+            target = salt.step_recirc(_as_float(body, "dt", 1.0))
+        else:
+            raise PlantError(f"未知的回流阀操作: {action}", component="console")
+        return {"action": action, "position_pct": salt.recirc.position_pct(), "target_pct": target}
+
+    def _changeover(self, params: dict, body: dict) -> dict:
+        load = body.get("load_mw")
+        return self._platform.changeover(None if load is None else float(load))
+
+    def _changeover_begin(self, params: dict, body: dict) -> dict:
+        load = body.get("load_mw")
+        return self._platform.begin_changeover(None if load is None else float(load))
+
+    def _changeover_step(self, params: dict, body: dict) -> dict:
+        return self._platform.changeover_step(_as_float(body, "dt", 1.0))
+
+    def _changeover_abort(self, params: dict, body: dict) -> dict:
+        return self._platform.abort_changeover(str(body.get("reason", "operator_abort")))
+
+    def _handoffs(self, params: dict, body: dict) -> dict:
+        salt = self._platform.salt
+        journal = salt.handoff_journal
+        records = journal.records() if journal is not None else []
+        limit = int(params.get("limit", 50))
+        return {
+            "active": salt.handoff.active(),
+            "state": salt.handoff.state(),
+            "current": salt.handoff.record().as_dict() if salt.handoff.record() is not None else None,
+            "history": [record.as_dict() for record in records[-limit:]],
+            "count": len(records),
+        }
+
+    def _handoffs_verify(self, params: dict, body: dict) -> dict:
+        """切换台账编号与审计流水逐条对账。"""
+
+        platform = self._platform
+        entries = platform.audit.entries(limit=100_000)
+        audit_ids = {
+            str(item["payload"].get("handoff_id"))
+            for item in entries
+            if item["payload"].get("handoff_id")
+        }
+        report = platform.salt.verify_handoff_consistency(audit_ids)
+        report["audit_handoff_ids"] = len(audit_ids)
+        return report
+
+    def _salt_fault(self, params: dict, body: dict) -> dict:
+        return self._platform.salt.inject_fault(
+            str(body.get("device", "cold_pump")),
+            str(body.get("kind", "sensor")),
+            bool(body.get("active", True)),
+        )
 
     def _disturb(self, params: dict, body: dict) -> dict:
         kind = str(body.get("kind", "steam"))

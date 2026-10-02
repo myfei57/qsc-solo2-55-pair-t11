@@ -113,7 +113,22 @@ def _cmd_demo(args: argparse.Namespace) -> int:
             "violations": tracking_after_manual["violations"],
         },
         "washing": {key: washing[key] for key in ("ok", "washed", "mirrors", "violations")},
-        "handoff": {key: handoff[key] for key in ("ok", "peak_pressure_mpa", "max_pumps_running", "violations")},
+        "handoff": {
+            key: handoff[key]
+            for key in (
+                "ok",
+                "mode",
+                "outcome",
+                "peak_pressure_mpa",
+                "max_pumps_running",
+                "flow_undershoot_kg_s",
+                "flow_overshoot_kg_s",
+                "pressure_undershoot_mpa",
+                "pressure_overshoot_mpa",
+                "duration_s",
+                "violations",
+            )
+        },
         "disturbance": disturbance,
         "trip": {key: trip[key] for key in ("ok", "latched", "violations")},
         "reset": {key: reset[key] for key in ("ok", "state", "violations")},

@@ -36,6 +36,24 @@ def _table(title: str, rows: list[tuple[str, object]]) -> str:
     return f"<h2>{escape(title)}</h2><table>{body}</table>"
 
 
+def _table_rows(rows: list[tuple[str, object]]) -> str:
+    """只渲染两列数据表的表体（标题在外部控制样式）。"""
+
+    return "<table>" + "".join(
+        f"<tr><th>{escape(str(key))}</th><td>{escape(str(value))}</td></tr>" for key, value in rows
+    ) + "</table>"
+
+
+def _table_grid(title: str, head: tuple[str, ...], rows: list[tuple[object, ...]]) -> str:
+    """渲染一张多列表格。"""
+
+    header = "".join(f"<th>{escape(str(cell))}</th>" for cell in head)
+    body = ""
+    for row in rows:
+        body += "<tr>" + "".join(f"<td>{escape(str(cell))}</td>" for cell in row) + "</tr>"
+    return f"<h2>{escape(title)}</h2><table><tr>{header}</tr>{body}</table>"
+
+
 def _shell(title: str, body: str) -> str:
     """套上页头与导航。"""
 
@@ -102,9 +120,10 @@ def _receiver_page(platform: Platform) -> str:
 
 
 def _salt_page(platform: Platform) -> str:
-    """熔盐页：罐位、泵与联锁门限。"""
+    """熔盐页：罐位、泵、回流阀、切换过程与过冲台账。"""
 
     salt = platform.status()["salt"]
+    current = salt.get("current_handoff")
     rows = [
         ("冷盐罐液位 (%)", f"{salt['cold_tank']['level_pct']} ({salt['cold_tank']['level_kg']} kg)"),
         ("热盐罐液位 (%)", f"{salt['hot_tank']['level_pct']} ({salt['hot_tank']['level_kg']} kg)"),
@@ -113,13 +132,70 @@ def _salt_page(platform: Platform) -> str:
         ("母管净流量 (kg/s)", salt["net_flow_kg_s"]),
         ("母管压力 (MPa)", salt["header"]["pressure_mpa"]),
         ("在运泵数", salt["cold_pump"]["running"] + salt["hot_pump"]["running"]),
-        ("两泵对顶步数", salt["opposed_steps"]),
+        ("两泵对顶步数（手动并泵）", salt["opposed_steps"]),
+        ("回流阀开度 (%)", salt["recirc_valve"]["position_pct"]),
+        ("回流阀安全位", salt["recirc_valve"]["safe_position"]),
         ("流量基线 (kg/s)", salt["baseline_kg_s"]),
         ("联锁门限 (kg/s)", salt["threshold_kg_s"]),
         ("标定代际", salt["epoch"]),
         ("成功切换次数", salt["changeovers"]),
     ]
-    return _shell("熔盐控制台", _table("熔盐回路", rows))
+    body = _table("熔盐回路", rows)
+
+    if current is not None:
+        live = [
+            ("切换编号", current["handoff_id"]),
+            ("进行中", "是" if salt["handoff_active"] else "否（最近一次）"),
+            ("当前阶段", current["state"]),
+            ("模式（按罐况裁决）", current["mode"]),
+            ("结局", current["outcome"] or "-"),
+            ("看门狗窗口 (s)", current["window_s"]),
+            ("罐况允许对灌 (s)", current["available_s"]),
+            ("已用时长 (s)", current["duration_s"] if not salt["handoff_active"] else "-"),
+            ("当前负荷 (MW)", current["load_mw"]),
+            ("流量下掉 (kg/s)", current["flow_undershoot_kg_s"]),
+            ("流量过冲 (kg/s)", current["flow_overshoot_kg_s"]),
+            ("压力下塌 (MPa)", current["pressure_undershoot_mpa"]),
+            ("压力过冲 (MPa)", current["pressure_overshoot_mpa"]),
+            ("违约／部分失败", ";".join(current["violations"]) or "-"),
+        ]
+        css = "warn" if salt["handoff_active"] else ("alarm" if not current["ok"] else "ok")
+        body += f'<h2 class="{css}">切换过程</h2>' + _table_rows(live)
+        if current.get("trace"):
+            head = ("t(s)", "阶段", "冷泵", "热泵", "母管流量", "压力", "回流阀%", "份额")
+            trace_rows = [
+                (
+                    item["t_s"],
+                    item["state"],
+                    item["cold_flow_kg_s"],
+                    item["hot_flow_kg_s"],
+                    item["flow_kg_s"],
+                    item["pressure_mpa"],
+                    item["recirc_pct"],
+                    item["share"],
+                )
+                for item in current["trace"]
+            ]
+            body += _table_grid("切换轨迹", head, trace_rows)
+
+    history = salt.get("handoff_history", [])
+    if history:
+        head = ("编号", "模式", "结局", "时长", "流量下掉", "流量过冲", "压力下塌", "压力过冲")
+        hist_rows = [
+            (
+                item["handoff_id"],
+                item["mode"],
+                item["outcome"],
+                item["duration_s"],
+                item["flow_undershoot_kg_s"],
+                item["flow_overshoot_kg_s"],
+                item["pressure_undershoot_mpa"],
+                item["pressure_overshoot_mpa"],
+            )
+            for item in reversed(history[-12:])
+        ]
+        body += _table_grid("切换过冲台账（最近 12 次）", head, hist_rows)
+    return _shell("熔盐控制台", body)
 
 
 def _alarm_page(platform: Platform) -> str:

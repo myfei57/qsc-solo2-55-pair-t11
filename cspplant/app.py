@@ -42,6 +42,7 @@ from .receiver.threshold import ThresholdModel
 from .receiver.valve import InletValve
 from .salt.loop import SaltLoop
 from .salt.persist import SaltPersistence
+from .salt.handoff_journal import HandoffJournal
 from .sequence import (
     acquire_and_track,
     circulate,
@@ -148,6 +149,9 @@ class Platform:
             thermal,
             self.receiver.header,
             SaltPersistence(store),
+            bus=self.bus,
+            clock=self.clock,
+            journal=HandoffJournal(store),
         )
 
         bypass = BypassValve(self.config.steam)
@@ -224,6 +228,7 @@ class Platform:
             ("salt", "hot_tank", "salt-tank"),
             ("salt", "cold_pump", "salt-pump"),
             ("salt", "hot_pump", "salt-pump"),
+            ("salt", "recirc_valve", "control-valve"),
             ("steam", "bypass", "bypass-valve"),
             ("steam", "turbine", "steam-turbine"),
             ("wash", "truck", "wash-truck"),
@@ -301,11 +306,16 @@ class Platform:
         }
         if report.get("reason"):
             summary["reason"] = report["reason"]
+        # 切换的阶段与终态事件已由状态机逐条发布（handoff_id 与审计一致），
+        # 这里只补一条操作汇总，不重复终态事件名。
+        complete_action = (
+            "operation_complete" if operation == "changeover" else f"{operation}_complete"
+        )
         self.bus.publish(
             Event.of(
                 "audit",
                 "audit",
-                f"{operation}_complete",
+                complete_action,
                 severity="notice" if report.get("ok") else "warning",
                 message=f"{operation} 完成" if report.get("ok") else f"{operation} 未完成",
                 **summary,
@@ -399,23 +409,79 @@ class Platform:
             self._persist()
             return {**report, **summary}
 
-    def changeover(self) -> dict:
-        """冷热罐切换：先停冷泵、再启热泵。"""
+    def changeover(self, load_mw: float | None = None) -> dict:
+        """冷热罐切换：流量斜率交叉，保持母管流量压力不断档。
+
+        模式由罐况裁决（缓斜率长窗口／陡斜率短窗口／罐况不足拒绝），切换过程
+        逐阶段上控制台事件并落审计，过冲随终态记录写切换台账。
+        """
 
         with self._lock:
             op_id = self.ids.next()
-            handoff = self.salt.changeover()
-            report = {
-                "ok": handoff.ok,
-                "steps": handoff.steps,
-                "violations": handoff.violations,
-                "peak_pressure_mpa": handoff.peak_pressure_mpa,
-                "max_pumps_running": handoff.max_pumps_running,
-            }
+            load = float(load_mw) if load_mw is not None else float(self.steam.status().get("load_mw", 0.0))
+            handoff = self.salt.changeover(
+                handoff_id=op_id, ts=self.clock.now(), load_mw=load
+            )
+            report = self._handoff_report(op_id, handoff)
             summary = self._record_operation(op_id, "changeover", report)
             self._operations += 1
             self._persist()
             return {**report, **summary}
+
+    def begin_changeover(self, load_mw: float | None = None) -> dict:
+        """发起切换但只跑发起检查；之后由控制周期 cycle 逐步推进（供控制台观察）。"""
+
+        with self._lock:
+            op_id = self.ids.next()
+            load = float(load_mw) if load_mw is not None else 0.0
+            record = self.salt.begin_changeover(op_id, self.clock.now(), load_mw=load)
+            return {"op_id": op_id, **record.as_dict()}
+
+    def changeover_step(self, dt: float = 1.0) -> dict:
+        """推进在途切换一个周期；终态时写台账并返回汇总。"""
+
+        with self._lock:
+            record = self.salt.changeover_tick(dt)
+            payload = record.as_dict()
+            if not self.salt.handoff.active():
+                report = self._handoff_report(record.handoff_id, record)
+                payload = {**payload, **self._record_operation(record.handoff_id, "changeover", report)}
+                self._operations += 1
+                self._persist()
+            return payload
+
+    def abort_changeover(self, reason: str = "operator_abort") -> dict:
+        """人工中止在途切换，退回安全位。"""
+
+        with self._lock:
+            return {"aborted": self.salt.abort_changeover(reason), "reason": reason}
+
+    def _handoff_report(self, op_id: str, handoff) -> dict:
+        """把切换记录翻译成操作编排报告（steps/violations 与审计同口径）。"""
+
+        return {
+            "ok": handoff.ok,
+            "steps": handoff.steps,
+            "violations": handoff.violations,
+            "peak_pressure_mpa": handoff.peak_pressure_mpa,
+            "max_pumps_running": handoff.max_pumps_running,
+            "handoff_id": op_id,
+            "mode": handoff.mode,
+            "outcome": handoff.outcome,
+            "duration_s": handoff.duration_s,
+            "window_s": handoff.window_s,
+            "available_s": handoff.available_s,
+            "load_mw": handoff.load_mw,
+            "flow_min_kg_s": handoff.flow_min_kg_s,
+            "flow_max_kg_s": handoff.flow_max_kg_s,
+            "flow_overshoot_kg_s": handoff.flow_overshoot_kg_s,
+            "flow_undershoot_kg_s": handoff.flow_undershoot_kg_s,
+            "pressure_min_mpa": handoff.pressure_min_mpa,
+            "pressure_max_mpa": handoff.pressure_max_mpa,
+            "pressure_overshoot_mpa": handoff.pressure_overshoot_mpa,
+            "pressure_undershoot_mpa": handoff.pressure_undershoot_mpa,
+            "trace": handoff.trace,
+        }
 
     def wash(self, mirrors: list[str] | None = None, zone: str = "maint-north") -> dict:
         """按批次清洗镜面。"""

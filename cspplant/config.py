@@ -179,7 +179,13 @@ class ReceiverLimits:
 
 @dataclass(frozen=True)
 class SaltLimits:
-    """熔盐液位、泵升速与母管压力约束。"""
+    """熔盐液位、泵升速与母管压力约束。
+
+    切换过渡定死为"流量斜率"：切换期间两台泵协调成出泵份额下降、进泵份额上升，
+    母管总流量始终夹在基线带内；``handoff_slow_window_s`` 与
+    ``handoff_fast_window_s`` 只作为看门狗上限，不用时间推动状态机。模式由罐况
+    折算的安全对灌时长自动选择，不由操作员指定。
+    """
 
     cold_level_min_pct: float
     hot_level_max_pct: float
@@ -189,6 +195,15 @@ class SaltLimits:
     flow_tolerance_kg_s: float
     header_pressure_target_mpa: float
     header_pressure_max_mpa: float
+    handoff_flow_band_kg_s: float
+    handoff_share_ramp_per_s: float
+    handoff_fast_share_ramp_per_s: float
+    handoff_slow_window_s: float
+    handoff_fast_window_s: float
+    handoff_takeover_share: float
+    handoff_level_guard_pct: float
+    handoff_readback_stale_s: float
+    recirc_valve_travel_pct_s: float
 
     @classmethod
     def from_mapping(cls, section: Mapping[str, Any]) -> "SaltLimits":
@@ -201,11 +216,28 @@ class SaltLimits:
             flow_tolerance_kg_s=_number(section, "flow_tolerance_kg_s", minimum=0.1),
             header_pressure_target_mpa=_number(section, "header_pressure_target_mpa", minimum=0.1),
             header_pressure_max_mpa=_number(section, "header_pressure_max_mpa", minimum=0.2),
+            handoff_flow_band_kg_s=_number(section, "handoff_flow_band_kg_s", minimum=0.1),
+            handoff_share_ramp_per_s=_number(section, "handoff_share_ramp_per_s", minimum=0.001),
+            handoff_fast_share_ramp_per_s=_number(section, "handoff_fast_share_ramp_per_s", minimum=0.001),
+            handoff_slow_window_s=_number(section, "handoff_slow_window_s", minimum=1.0),
+            handoff_fast_window_s=_number(section, "handoff_fast_window_s", minimum=1.0),
+            handoff_takeover_share=_number(section, "handoff_takeover_share", minimum=0.5),
+            handoff_level_guard_pct=_number(section, "handoff_level_guard_pct", minimum=0.0),
+            handoff_readback_stale_s=_number(section, "handoff_readback_stale_s", minimum=0.2),
+            recirc_valve_travel_pct_s=_number(section, "recirc_valve_travel_pct_s", minimum=0.1),
         )
         if limits.hot_level_max_pct > 100.0:
             raise ConfigError("热盐罐上限不得超过 100%", component="config")
         if limits.header_pressure_max_mpa <= limits.header_pressure_target_mpa:
             raise ConfigError("母管压力上限必须大于目标值", component="config")
+        if limits.handoff_fast_share_ramp_per_s <= limits.handoff_share_ramp_per_s:
+            raise ConfigError("快速切换斜率必须大于平缓切换斜率", component="config")
+        if limits.handoff_fast_window_s > limits.handoff_slow_window_s:
+            raise ConfigError("快速切换窗口不得长于平缓切换窗口", component="config")
+        if limits.handoff_takeover_share > 1.0:
+            raise ConfigError("进泵接管份额必须不大于 1", component="config")
+        if limits.cold_level_min_pct + limits.handoff_level_guard_pct >= limits.hot_level_max_pct:
+            raise ConfigError("液位保护带与冷罐下限之和必须低于热罐上限", component="config")
         return limits
 
     def low_flow_threshold(self, baseline_kg_s: float) -> float:
@@ -347,7 +379,18 @@ def default_config() -> PlatformConfig:
         irradiance=IrradianceLimits(250.0, 1100.0, 30.0, 180.0),
         field=FieldLimits(320.0, 6.0, 12, 6.0),
         receiver=ReceiverLimits(600.0, 620.0, 720.0, 42.0, 20.0, 8.0, 22.0),
-        salt=SaltLimits(18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4),
+        salt=SaltLimits(
+            18.0, 96.0, 1.4, 15.0, 58.0, 9.0, 2.5, 3.4,
+            handoff_flow_band_kg_s=4.0,
+            handoff_share_ramp_per_s=0.02,
+            handoff_fast_share_ramp_per_s=0.06,
+            handoff_slow_window_s=120.0,
+            handoff_fast_window_s=60.0,
+            handoff_takeover_share=0.9,
+            handoff_level_guard_pct=3.0,
+            handoff_readback_stale_s=3.0,
+            recirc_valve_travel_pct_s=10.0,
+        ),
         steam=SteamLimits(12.0, 0.8, 6.0, 30.0, 1.0),
         wash=WashLimits(90.0, 26.0, 4.0, 9.0),
         alarm=AlarmLimits(5.0, 120.0),
@@ -398,6 +441,15 @@ def config_to_mapping(cfg: PlatformConfig) -> dict:
                 "flow_tolerance_kg_s": cfg.salt.flow_tolerance_kg_s,
                 "header_pressure_target_mpa": cfg.salt.header_pressure_target_mpa,
                 "header_pressure_max_mpa": cfg.salt.header_pressure_max_mpa,
+                "handoff_flow_band_kg_s": cfg.salt.handoff_flow_band_kg_s,
+                "handoff_share_ramp_per_s": cfg.salt.handoff_share_ramp_per_s,
+                "handoff_fast_share_ramp_per_s": cfg.salt.handoff_fast_share_ramp_per_s,
+                "handoff_slow_window_s": cfg.salt.handoff_slow_window_s,
+                "handoff_fast_window_s": cfg.salt.handoff_fast_window_s,
+                "handoff_takeover_share": cfg.salt.handoff_takeover_share,
+                "handoff_level_guard_pct": cfg.salt.handoff_level_guard_pct,
+                "handoff_readback_stale_s": cfg.salt.handoff_readback_stale_s,
+                "recirc_valve_travel_pct_s": cfg.salt.recirc_valve_travel_pct_s,
             },
             "steam": {
                 "pressure_target_mpa": cfg.steam.pressure_target_mpa,

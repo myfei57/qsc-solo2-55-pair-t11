@@ -17,7 +17,10 @@ def test_demo_runs_end_to_end(tmp_path, capsys):
     assert payload["launch"]["flow_kg_s"] == 58.0
     assert payload["concurrency"]["effective_pct"] == payload["concurrency"]["ceiling_pct"]
     assert payload["washing"]["ok"] is True
-    assert payload["handoff"]["max_pumps_running"] == 1
+    assert payload["handoff"]["ok"] is True
+    assert payload["handoff"]["outcome"] == "completed"
+    assert payload["handoff"]["mode"] in ("slow", "fast")
+    assert payload["handoff"]["flow_undershoot_kg_s"] < 4.0
     assert payload["trip"]["latched"] is True
     assert payload["reset"]["ok"] is True
     assert all(item["ok"] for item in payload["probe"].values())
